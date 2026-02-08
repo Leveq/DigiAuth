@@ -54,8 +54,8 @@ DigiAuth replaces traditional username/password authentication with public-key c
 
 ```bash
 # Clone the repo
-git clone https://github.com/kdogg/digiauth.git
-cd digiauth
+git clone https://github.com/Leveq/DigiAuth.git
+cd DigiAuth
 
 # Generate RSA keys for JWT signing
 make keys
@@ -93,16 +93,17 @@ digiauth/
 │   ├── domain/          # Core entities (User, Session, Challenge)
 │   │   └── ports/       # Repository & store interfaces
 │   ├── handler/         # HTTP request handlers
-│   ├── middleware/       # JWT auth, rate limiting, logging
+│   ├── middleware/      # JWT auth, rate limiting, logging
 │   ├── repository/
 │   │   ├── postgres/    # PostgreSQL implementations
 │   │   └── redis/       # Redis implementations
 │   └── service/         # Business logic (AuthService, UserService)
-├── pkg/digiauth/        # Public SDK (extractable Go module)
 ├── migrations/          # PostgreSQL migration files
-├── web/                 # Next.js frontend (Phase 2)
-├── sdk/                 # TypeScript SDK (Phase 4)
-└── docs/                # Architecture documentation
+├── keys/                # RSA keys for JWT (gitignored)
+└── [planned]
+    ├── pkg/digiauth/    # Public SDK (extractable Go module)
+    ├── web/             # Next.js frontend
+    └── docs/            # Architecture documentation
 ```
 
 ## API Endpoints
@@ -127,10 +128,10 @@ digiauth/
 DigiAuth is designed to be reused across projects. Three integration patterns:
 
 1. **OAuth2 Redirect** — Add "Sign in with DigiByte" to any app (like "Sign in with Google")
-2. **TypeScript SDK** — `npm install @kdogg/digiauth-sdk` for React/Next.js apps
+2. **TypeScript SDK** — `npm install @leveq/digiauth-sdk` for React/Next.js apps (coming soon)
 3. **Direct API** — Call REST endpoints from any backend
 
-See [Integration Guide](docs/integration.md) for details.
+> Integration guide coming in Phase 4.
 
 ## Development
 
@@ -142,11 +143,28 @@ make lint           # Run golangci-lint
 make db-reset       # Reset database (drop + recreate)
 ```
 
+### Testing
+
+Unit tests are in `*_test.go` files alongside the code they test:
+
+```bash
+# Run all tests
+go test ./... -v
+
+# Run with coverage
+go test ./internal/crypto/... ./internal/service/... -cover
+```
+
+Current coverage:
+- `internal/crypto/` — 87%+ (Digi-ID protocol)
+- `internal/service/` — 48%+ (auth & user services)
+
 ## Roadmap
 
 - [x] Phase 1: Core auth server (Go + Digi-ID crypto + JWT)
-- [ ] Phase 2: User profiles + Next.js frontend
-- [ ] Phase 3: Social feed demo + protected API examples
+- [x] Phase 1.5: Unit tests for crypto & services
+- [ ] Phase 2: Next.js frontend with QR code scanning
+- [ ] Phase 3: Public SDK package (`pkg/digiauth`)
 - [ ] Phase 4: OAuth2 provider + TypeScript SDK
 - [ ] Phase 5: Production deployment + community launch
 
@@ -160,4 +178,4 @@ Contributions welcome! This project is open source because the DigiByte ecosyste
 
 ---
 
-**Built by [KDOGG](https://leveq.dev)** | Powered by [DigiByte](https://digibyte.org)
+**Built by [Leveq](https://leveq.dev)** | Powered by [DigiByte](https://digibyte.org)
