@@ -19,29 +19,56 @@ import (
 	"github.com/kdogg/digiauth/internal/config"
 	"github.com/kdogg/digiauth/internal/handler"
 	"github.com/kdogg/digiauth/internal/middleware"
+	"github.com/kdogg/digiauth/internal/repository/postgres"
+	redisrepo "github.com/kdogg/digiauth/internal/repository/redis"
+	"github.com/kdogg/digiauth/internal/service"
 )
 
 func main() {
+	ctx := context.Background()
+
 	// ─── Load Configuration ─────────────────────────────────────────
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
-
 	log.Printf("DigiAuth starting in %s mode on %s:%d", cfg.Server.Env, cfg.Server.Host, cfg.Server.Port)
 
 	// ─── Load RSA Keys for JWT ──────────────────────────────────────
 	privateKey, publicKey, err := loadRSAKeys(cfg.Auth.JWTPrivateKey, cfg.Auth.JWTPublicKey)
 	if err != nil {
-		log.Fatalf("Failed to load RSA keys: %v", err)
+		log.Fatalf("Failed to load RSA keys: %v\nRun 'make keys' to generate them.", err)
 	}
 	log.Println("RSA keys loaded successfully")
 
+	// ─── Connect to PostgreSQL ──────────────────────────────────────
+	pgPool, err := postgres.NewPool(ctx, cfg.Database.DSN())
+	if err != nil {
+		log.Fatalf("Failed to connect to PostgreSQL: %v\nRun 'make db-up' to start the database.", err)
+	}
+	defer pgPool.Close()
+	log.Println("Connected to PostgreSQL")
+
+	// ─── Connect to Redis ───────────────────────────────────────────
+	redisClient, err := redisrepo.NewClient(ctx, cfg.Redis.Addr(), cfg.Redis.Password, cfg.Redis.DB)
+	if err != nil {
+		log.Fatalf("Failed to connect to Redis: %v\nRun 'make db-up' to start Redis.", err)
+	}
+	defer redisClient.Close()
+	log.Println("Connected to Redis")
+
 	// ─── Initialize Repositories ────────────────────────────────────
-	// TODO: Replace with real PostgreSQL and Redis implementations
-	// For now, we'll use the handler setup to verify routing works
-	_ = privateKey
-	_ = publicKey
+	userRepo := postgres.NewUserRepository(pgPool)
+	sessionRepo := postgres.NewSessionRepository(pgPool)
+	challengeStore := redisrepo.NewChallengeStore(redisClient)
+
+	// ─── Initialize Services ────────────────────────────────────────
+	authService := service.NewAuthService(userRepo, sessionRepo, challengeStore, cfg, privateKey, publicKey)
+	userService := service.NewUserService(userRepo)
+
+	// ─── Initialize Handlers ────────────────────────────────────────
+	authHandler := handler.NewAuthHandler(authService)
+	userHandler := handler.NewUserHandler(userService)
 
 	// ─── Build Router ───────────────────────────────────────────────
 	r := chi.NewRouter()
@@ -70,19 +97,24 @@ func main() {
 
 	// API v1 routes
 	r.Route("/api/v1", func(r chi.Router) {
-		// Public auth routes (no JWT required)
-		// r.Mount("/auth", authHandler.Routes())
+		// Public auth routes — no JWT required
+		r.Mount("/auth", authHandler.Routes())
 
-		// Protected routes (JWT required)
+		// Protected routes — JWT required
 		r.Group(func(r chi.Router) {
-			// r.Use(middleware.JWTAuth(authService))
-			// r.Mount("/users", userHandler.Routes())
+			r.Use(middleware.JWTAuth(authService))
+			r.Mount("/users", userHandler.Routes())
 		})
 
-		// Demo endpoints (mixed auth)
+		// Demo endpoints
 		r.Get("/demo/public", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			w.Write([]byte(`{"message":"This endpoint is public. No authentication required.","data":{"blockchain":"DigiByte","protocol":"Digi-ID"}}`))
+		})
+		r.With(middleware.JWTAuth(authService)).Get("/demo/protected", func(w http.ResponseWriter, r *http.Request) {
+			claims := middleware.GetClaims(r.Context())
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(fmt.Sprintf(`{"message":"You are authenticated!","user_id":"%s","dgb_address":"%s"}`, claims.UserID, claims.DGBAddress)))
 		})
 	})
 
@@ -99,9 +131,9 @@ func main() {
 	go func() {
 		sigChan := make(chan os.Signal, 1)
 		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-		<-sigChan
+		sig := <-sigChan
 
-		log.Println("Shutting down gracefully...")
+		log.Printf("Received signal %v, shutting down gracefully...", sig)
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
@@ -111,6 +143,10 @@ func main() {
 	}()
 
 	log.Printf("DigiAuth server listening on %s", srv.Addr)
+	log.Printf("  Health:    http://localhost:%d/health", cfg.Server.Port)
+	log.Printf("  Challenge: POST http://localhost:%d/api/v1/auth/challenge", cfg.Server.Port)
+	log.Printf("  Demo:      GET  http://localhost:%d/api/v1/demo/public", cfg.Server.Port)
+
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("Server failed: %v", err)
 	}
@@ -120,7 +156,6 @@ func main() {
 
 // loadRSAKeys reads PEM-encoded RSA key files for JWT signing/verification.
 func loadRSAKeys(privatePath, publicPath string) (*rsa.PrivateKey, *rsa.PublicKey, error) {
-	// Read private key
 	privPEM, err := os.ReadFile(privatePath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to read private key %s: %w", privatePath, err)
@@ -133,7 +168,6 @@ func loadRSAKeys(privatePath, publicPath string) (*rsa.PrivateKey, *rsa.PublicKe
 
 	privateKey, err := x509.ParsePKCS1PrivateKey(privBlock.Bytes)
 	if err != nil {
-		// Try PKCS8 format
 		key, err2 := x509.ParsePKCS8PrivateKey(privBlock.Bytes)
 		if err2 != nil {
 			return nil, nil, fmt.Errorf("failed to parse private key: PKCS1=%v, PKCS8=%v", err, err2)
@@ -145,7 +179,6 @@ func loadRSAKeys(privatePath, publicPath string) (*rsa.PrivateKey, *rsa.PublicKe
 		}
 	}
 
-	// Read public key
 	pubPEM, err := os.ReadFile(publicPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to read public key %s: %w", publicPath, err)
@@ -168,7 +201,3 @@ func loadRSAKeys(privatePath, publicPath string) (*rsa.PrivateKey, *rsa.PublicKe
 
 	return privateKey, publicKey, nil
 }
-
-// Ensure middleware import is used (remove when routes are wired)
-var _ = middleware.JWTAuth
-var _ = handler.NewAuthHandler
